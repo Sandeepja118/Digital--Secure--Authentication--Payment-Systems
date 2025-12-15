@@ -1,0 +1,921 @@
+---
+# Namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: django-auth-payment
+  labels:
+    name: django-auth-payment
+    environment: production
+
+---
+# ConfigMap for Django Settings
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: django-config
+  namespace: django-auth-payment
+data:
+  DJANGO_SETTINGS_MODULE: "config.settings.production"
+  DEBUG: "False"
+  ALLOWED_HOSTS: "localhost,127.0.0.1,api.example.com"
+  DATABASE_ENGINE: "django.db.backends.postgresql"
+  DATABASE_NAME: "django_db"
+  DATABASE_USER: "django_user"
+  DATABASE_HOST: "postgres-service"
+  DATABASE_PORT: "5432"
+  REDIS_URL: "redis://redis-service:6379/0"
+  CELERY_BROKER_URL: "redis://redis-service:6379/1"
+  CELERY_RESULT_BACKEND: "redis://redis-service:6379/2"
+  CSRF_TRUSTED_ORIGINS: "https://api.example.com"
+  SECURE_SSL_REDIRECT: "True"
+  SESSION_COOKIE_SECURE: "True"
+  CSRF_COOKIE_SECURE: "True"
+  LOG_LEVEL: "INFO"
+
+---
+# Secret for Sensitive Data
+apiVersion: v1
+kind: Secret
+metadata:
+  name: django-secrets
+  namespace: django-auth-payment
+type: Opaque
+stringData:
+  SECRET_KEY: "change-me-to-a-secure-random-key-in-production"
+  DATABASE_PASSWORD: "secure-password-change-in-production"
+  STRIPE_API_KEY: "sk_live_your_stripe_key_here"
+  STRIPE_SECRET_KEY: "sk_test_your_stripe_secret_key"
+  JWT_SECRET_KEY: "your-jwt-secret-key-change-in-production"
+  EMAIL_PASSWORD: "your-email-password"
+  EMAIL_HOST_USER: "your-email@gmail.com"
+  SENTRY_DSN: "your-sentry-dsn-url"
+
+---
+# ServiceAccount for Django Deployment
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: django-app-sa
+  namespace: django-auth-payment
+
+---
+# Role for RBAC
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: django-app-role
+  namespace: django-auth-payment
+rules:
+- apiGroups: [""]
+  resources: ["configmaps", "secrets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list"]
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  verbs: ["get", "list"]
+- apiGroups: ["batch"]
+  resources: ["jobs", "cronjobs"]
+  verbs: ["get", "list", "create", "update", "patch"]
+
+---
+# RoleBinding for RBAC
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: django-app-rolebinding
+  namespace: django-auth-payment
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: django-app-role
+subjects:
+- kind: ServiceAccount
+  name: django-app-sa
+  namespace: django-auth-payment
+
+---
+# PersistentVolumeClaim for Static Files
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: django-static-files-pvc
+  namespace: django-auth-payment
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 5Gi
+
+---
+# PersistentVolumeClaim for Media Files
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: django-media-files-pvc
+  namespace: django-auth-payment
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 20Gi
+
+---
+# PersistentVolumeClaim for Logs
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: django-logs-pvc
+  namespace: django-auth-payment
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 10Gi
+
+---
+# Django API Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: django-api
+  namespace: django-auth-payment
+  labels:
+    app: django-api
+    version: v1
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: django-api
+  template:
+    metadata:
+      labels:
+        app: django-api
+        version: v1
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: django-app-sa
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - django-api
+              topologyKey: kubernetes.io/hostname
+          - weight: 50
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - django-api
+              topologyKey: topology.kubernetes.io/zone
+      containers:
+      - name: django-api
+        image: your-registry/django-api:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 8000
+          protocol: TCP
+        - name: metrics
+          containerPort: 9000
+          protocol: TCP
+        env:
+        - name: DEBUG
+          valueFrom:
+            configMapKeyRef:
+              name: django-config
+              key: DEBUG
+        - name: DJANGO_SETTINGS_MODULE
+          valueFrom:
+            configMapKeyRef:
+              name: django-config
+              key: DJANGO_SETTINGS_MODULE
+        - name: ALLOWED_HOSTS
+          valueFrom:
+            configMapKeyRef:
+              name: django-config
+              key: ALLOWED_HOSTS
+        - name: DATABASE_ENGINE
+          valueFrom:
+            configMapKeyRef:
+              name: django-config
+              key: DATABASE_ENGINE
+        - name: DATABASE_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: django-config
+              key: DATABASE_NAME
+        - name: DATABASE_USER
+          valueFrom:
+            configMapKeyRef:
+              name: django-config
+              key: DATABASE_USER
+        - name: DATABASE_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: django-config
+              key: DATABASE_HOST
+        - name: DATABASE_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: django-config
+              key: DATABASE_PORT
+        - name: DATABASE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: django-secrets
+              key: DATABASE_PASSWORD
+        - name: SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: django-secrets
+              key: SECRET_KEY
+        - name: REDIS_URL
+          valueFrom:
+            configMapKeyRef:
+              name: django-config
+              key: REDIS_URL
+        - name: CELERY_BROKER_URL
+          valueFrom:
+            configMapKeyRef:
+              name: django-config
+              key: CELERY_BROKER_URL
+        - name: CELERY_RESULT_BACKEND
+          valueFrom:
+            configMapKeyRef:
+              name: django-config
+              key: CELERY_RESULT_BACKEND
+        - name: STRIPE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: django-secrets
+              key: STRIPE_API_KEY
+        - name: STRIPE_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: django-secrets
+              key: STRIPE_SECRET_KEY
+        - name: JWT_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: django-secrets
+              key: JWT_SECRET_KEY
+        - name: CSRF_TRUSTED_ORIGINS
+          valueFrom:
+            configMapKeyRef:
+              name: django-config
+              key: CSRF_TRUSTED_ORIGINS
+        - name: SECURE_SSL_REDIRECT
+          valueFrom:
+            configMapKeyRef:
+              name: django-config
+              key: SECURE_SSL_REDIRECT
+        - name: SESSION_COOKIE_SECURE
+          valueFrom:
+            configMapKeyRef:
+              name: django-config
+              key: SESSION_COOKIE_SECURE
+        - name: CSRF_COOKIE_SECURE
+          valueFrom:
+            configMapKeyRef:
+              name: django-config
+              key: CSRF_COOKIE_SECURE
+        - name: LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: django-config
+              key: LOG_LEVEL
+        livenessProbe:
+          httpGet:
+            path: /health/live/
+            port: http
+            scheme: HTTP
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health/ready/
+            port: http
+            scheme: HTTP
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          successThreshold: 1
+          failureThreshold: 3
+        startupProbe:
+          httpGet:
+            path: /health/startup/
+            port: http
+            scheme: HTTP
+          initialDelaySeconds: 0
+          periodSeconds: 10
+          timeoutSeconds: 3
+          successThreshold: 1
+          failureThreshold: 30
+        resources:
+          requests:
+            cpu: 250m
+            memory: 512Mi
+            ephemeral-storage: 1Gi
+          limits:
+            cpu: 1000m
+            memory: 1Gi
+            ephemeral-storage: 2Gi
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop:
+            - ALL
+            add:
+            - NET_BIND_SERVICE
+        volumeMounts:
+        - name: static-files
+          mountPath: /app/staticfiles
+          readOnly: false
+        - name: media-files
+          mountPath: /app/media
+          readOnly: false
+        - name: logs
+          mountPath: /app/logs
+          readOnly: false
+        - name: tmp
+          mountPath: /tmp
+        lifecycle:
+          preStop:
+            exec:
+              command: ["/bin/sh", "-c", "sleep 15"]
+      volumes:
+      - name: static-files
+        persistentVolumeClaim:
+          claimName: django-static-files-pvc
+      - name: media-files
+        persistentVolumeClaim:
+          claimName: django-media-files-pvc
+      - name: logs
+        persistentVolumeClaim:
+          claimName: django-logs-pvc
+      - name: tmp
+        emptyDir: {}
+      terminationGracePeriodSeconds: 30
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+
+---
+# Celery Worker Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: celery-worker
+  namespace: django-auth-payment
+  labels:
+    app: celery-worker
+    version: v1
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: celery-worker
+  template:
+    metadata:
+      labels:
+        app: celery-worker
+        version: v1
+    spec:
+      serviceAccountName: django-app-sa
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - celery-worker
+              topologyKey: kubernetes.io/hostname
+      containers:
+      - name: celery-worker
+        image: your-registry/django-api:latest
+        imagePullPolicy: IfNotPresent
+        command: ["celery", "-A", "config", "worker", "-l", "info", "-c", "4"]
+        env:
+        - name: DJANGO_SETTINGS_MODULE
+          valueFrom:
+            configMapKeyRef:
+              name: django-config
+              key: DJANGO_SETTINGS_MODULE
+        - name: CELERY_BROKER_URL
+          valueFrom:
+            configMapKeyRef:
+              name: django-config
+              key: CELERY_BROKER_URL
+        - name: CELERY_RESULT_BACKEND
+          valueFrom:
+            configMapKeyRef:
+              name: django-config
+              key: CELERY_RESULT_BACKEND
+        - name: DATABASE_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: django-config
+              key: DATABASE_HOST
+        - name: DATABASE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: django-secrets
+              key: DATABASE_PASSWORD
+        - name: SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: django-secrets
+              key: SECRET_KEY
+        resources:
+          requests:
+            cpu: 200m
+            memory: 256Mi
+            ephemeral-storage: 1Gi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+            ephemeral-storage: 2Gi
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: logs
+          mountPath: /app/logs
+        - name: tmp
+          mountPath: /tmp
+        livenessProbe:
+          exec:
+            command:
+            - celery
+            - -A
+            - config
+            - inspect
+            - active
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+      volumes:
+      - name: logs
+        persistentVolumeClaim:
+          claimName: django-logs-pvc
+      - name: tmp
+        emptyDir: {}
+      terminationGracePeriodSeconds: 60
+
+---
+# Celery Beat Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: celery-beat
+  namespace: django-auth-payment
+  labels:
+    app: celery-beat
+    version: v1
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: celery-beat
+  template:
+    metadata:
+      labels:
+        app: celery-beat
+        version: v1
+    spec:
+      serviceAccountName: django-app-sa
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: celery-beat
+        image: your-registry/django-api:latest
+        imagePullPolicy: IfNotPresent
+        command: ["celery", "-A", "config", "beat", "-l", "info", "--scheduler", "django_celery_beat.schedulers:DatabaseScheduler"]
+        env:
+        - name: DJANGO_SETTINGS_MODULE
+          valueFrom:
+            configMapKeyRef:
+              name: django-config
+              key: DJANGO_SETTINGS_MODULE
+        - name: CELERY_BROKER_URL
+          valueFrom:
+            configMapKeyRef:
+              name: django-config
+              key: CELERY_BROKER_URL
+        - name: CELERY_RESULT_BACKEND
+          valueFrom:
+            configMapKeyRef:
+              name: django-config
+              key: CELERY_RESULT_BACKEND
+        - name: DATABASE_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: django-config
+              key: DATABASE_HOST
+        - name: DATABASE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: django-secrets
+              key: DATABASE_PASSWORD
+        - name: SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: django-secrets
+              key: SECRET_KEY
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+            ephemeral-storage: 500Mi
+          limits:
+            cpu: 200m
+            memory: 256Mi
+            ephemeral-storage: 1Gi
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: logs
+          mountPath: /app/logs
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: logs
+        persistentVolumeClaim:
+          claimName: django-logs-pvc
+      - name: tmp
+        emptyDir: {}
+      terminationGracePeriodSeconds: 30
+
+---
+# Django API Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: django-api-service
+  namespace: django-auth-payment
+  labels:
+    app: django-api
+spec:
+  type: ClusterIP
+  ports:
+  - name: http
+    port: 8000
+    targetPort: http
+    protocol: TCP
+  - name: metrics
+    port: 9000
+    targetPort: metrics
+    protocol: TCP
+  selector:
+    app: django-api
+  sessionAffinity: None
+
+---
+# Horizontal Pod Autoscaler for Django API
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: django-api-hpa
+  namespace: django-auth-payment
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: django-api
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 50
+        periodSeconds: 60
+      - type: Pods
+        value: 1
+        periodSeconds: 60
+      selectPolicy: Min
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 30
+      - type: Pods
+        value: 2
+        periodSeconds: 30
+      selectPolicy: Max
+
+---
+# Horizontal Pod Autoscaler for Celery Worker
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: celery-worker-hpa
+  namespace: django-auth-payment
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: celery-worker
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 75
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 85
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 50
+        periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 30
+      selectPolicy: Max
+
+---
+# NetworkPolicy to restrict traffic
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: django-app-network-policy
+  namespace: django-auth-payment
+spec:
+  podSelector:
+    matchLabels:
+      app: django-api
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+    - podSelector:
+        matchLabels:
+          app: nginx-ingress
+    ports:
+    - protocol: TCP
+      port: 8000
+  - from:
+    - podSelector:
+        matchLabels:
+          app: celery-worker
+    ports:
+    - protocol: TCP
+      port: 8000
+  egress:
+  - to:
+    - namespaceSelector: {}
+    ports:
+    - protocol: TCP
+      port: 5432
+    - protocol: TCP
+      port: 6379
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 80
+  - to:
+    - podSelector:
+        matchLabels:
+          app: postgres
+    ports:
+    - protocol: TCP
+      port: 5432
+  - to:
+    - podSelector:
+        matchLabels:
+          app: redis
+    ports:
+    - protocol: TCP
+      port: 6379
+  - ports:
+    - protocol: TCP
+      port: 53
+    - protocol: UDP
+      port: 53
+
+---
+# NetworkPolicy for Celery Worker
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: celery-worker-network-policy
+  namespace: django-auth-payment
+spec:
+  podSelector:
+    matchLabels:
+      app: celery-worker
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: celery-beat
+    - podSelector:
+        matchLabels:
+          app: django-api
+    ports:
+    - protocol: TCP
+      port: 5672
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: redis
+    ports:
+    - protocol: TCP
+      port: 6379
+  - to:
+    - podSelector:
+        matchLabels:
+          app: postgres
+    ports:
+    - protocol: TCP
+      port: 5432
+  - ports:
+    - protocol: TCP
+      port: 53
+    - protocol: UDP
+      port: 53
+  - to:
+    - namespaceSelector: {}
+    ports:
+    - protocol: TCP
+      port: 443
+
+---
+# NetworkPolicy for Celery Beat
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: celery-beat-network-policy
+  namespace: django-auth-payment
+spec:
+  podSelector:
+    matchLabels:
+      app: celery-beat
+  policyTypes:
+  - Ingress
+  - Egress
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: redis
+    ports:
+    - protocol: TCP
+      port: 6379
+  - to:
+    - podSelector:
+        matchLabels:
+          app: postgres
+    ports:
+    - protocol: TCP
+      port: 5432
+  - to:
+    - podSelector:
+        matchLabels:
+          app: celery-worker
+    ports:
+    - protocol: TCP
+      port: 5672
+  - ports:
+    - protocol: TCP
+      port: 53
+    - protocol: UDP
+      port: 53
+
+---
+# Ingress Resource (optional - uncomment if needed)
+# apiVersion: networking.k8s.io/v1
+# kind: Ingress
+# metadata:
+#   name: django-api-ingress
+#   namespace: django-auth-payment
+#   annotations:
+#     cert-manager.io/cluster-issuer: "letsencrypt-prod"
+#     nginx.ingress.kubernetes.io/ssl-redirect: "true"
+#     nginx.ingress.kubernetes.io/rate-limit: "100"
+# spec:
+#   ingressClassName: nginx
+#   tls:
+#   - hosts:
+#     - api.example.com
+#     secretName: django-api-tls
+#   rules:
+#   - host: api.example.com
+#     http:
+#       paths:
+#       - path: /
+#         pathType: Prefix
+#         backend:
+#           service:
+#             name: django-api-service
+#             port:
+#               number: 8000
